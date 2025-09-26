@@ -195,6 +195,53 @@ function getTeamNamesFromVariables(): string[] {
 
 /* ------------------- WEEK PROTECTION HELPERS ------------------- */
 
+type WeekColumnBlock = {
+  startCol: number;
+  endCol: number;
+  label: string;
+};
+
+function getWeekColumnBlocks(sheet: GoogleAppsScript.Spreadsheet.Sheet): WeekColumnBlock[] {
+  const width = sheet.getLastColumn();
+  if (width < 5) return [];
+  const headerData = sheet.getRange(1, 1, 2, width).getValues();
+  const topRow = headerData[0];
+  const secondRow = headerData[1];
+  const blocks: WeekColumnBlock[] = [];
+
+  for (let c = 0; c < secondRow.length; c++) {
+    const subHeader = (secondRow[c] || '').toString().trim().toLowerCase();
+    if (subHeader === '5th') {
+      const endCol = c + 1;
+      const startCol = Math.max(1, endCol - 4);
+      const label = (topRow[c] || '').toString().trim();
+      blocks.push({ startCol, endCol, label });
+    }
+  }
+
+  return blocks;
+}
+
+function hidePastWeeksForSheet(
+  sheet: GoogleAppsScript.Spreadsheet.Sheet,
+  activeBlock: { startCol: number; endCol: number } | null
+): void {
+  const weekBlocks = getWeekColumnBlocks(sheet);
+  if (!weekBlocks.length) return;
+
+  weekBlocks.forEach((block) => {
+    sheet.showColumns(block.startCol, block.endCol - block.startCol + 1);
+  });
+
+  if (!activeBlock) return;
+
+  weekBlocks
+    .filter((block) => block.endCol < activeBlock.startCol)
+    .forEach((block) => {
+      sheet.hideColumns(block.startCol, block.endCol - block.startCol + 1);
+    });
+}
+
 // Find the current week's 5-column block (1st..5th) for a given team sheet.
 // Returns {startCol, endCol} in 1-based indexing, or null if not found.
 function getActiveWeekBlockCols(sheet: GoogleAppsScript.Spreadsheet.Sheet):
@@ -245,6 +292,7 @@ function lockPastWeeksForSheet(
 
   const cols = getActiveWeekBlockCols(sheet);
   if (!cols) {
+    hidePastWeeksForSheet(sheet, null);
     debugLog(`[${sheet.getName()}] No active week block detected. Skipping protection.`);
     return;
   }
@@ -278,6 +326,8 @@ function lockPastWeeksForSheet(
   debugLog(
     `[${sheet.getName()}] Week locks applied. Editable columns ${cols.startCol}-${cols.endCol} for student rows.`
   );
+
+  hidePastWeeksForSheet(sheet, cols);
 }
 
 // Refresh week locks across all team tabs
