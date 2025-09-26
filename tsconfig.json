@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES5",
+    "lib": ["es2019"],
+    "module": "none",
+    "outFile": "dist/Code.js",
+    "rootDir": "src",
+    "removeComments": false,
+    "typeRoots": [
+      "node_modules/@types"
+    ],
+    "types": ["google-apps-script"],
+    "noImplicitAny": false,
+    "esModuleInterop": false,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist"]
+}
