@@ -34,6 +34,7 @@ const EXCLUDE_SHEETS = [
   'EventLog',
   TEAM_TEMPLATE_NAME,
 ];
+const INFRACTION_SEQUENCE = ['1st', '2nd', '3rd', '4th', '5th'] as const;
 const DEV_MENU_OPTIONS = [
   { name: '▶️ 1. Restore Formulas & Merge Tags (BSS Setup)', functionName: 'bssSetup' },
   { name: '▶️ 2. Log New Infractions to Event Log', functionName: 'processNewEvents' },
@@ -464,7 +465,8 @@ function syncRosterForTeam(teamName: string): void {
       const dsid = student[studentHeaders.indexOf('DSID')];
       for (let col = 0; col < templateHeaders[2].length; col++) {
         const infractionLabel = (templateHeaders[1][col] || '').toString().trim();
-        if (['1st', '2nd', '3rd', '4th', '5th'].includes(infractionLabel)) {
+        const normalizedLabel = infractionLabel.toLowerCase();
+        if (INFRACTION_SEQUENCE.includes(normalizedLabel as typeof INFRACTION_SEQUENCE[number])) {
           const weekRaw = getWeekForInfractionCol(templateHeaders, col);
           const weekFormatted = formatWeekDate(weekRaw);
           const key = [dsid, infractionLabel, weekFormatted].join('|');
@@ -597,26 +599,109 @@ function onEdit(e: GoogleAppsScript.Events.SheetsOnEdit): void {
 
     // Identify infraction columns by row 2 labels
     const label = (sheet.getRange(2, col).getValue() || '').toString().trim().toLowerCase();
-    const isInfractionCol = ['1st', '2nd', '3rd', '4th', '5th'].indexOf(label) >= 0;
+    let labelIndex = INFRACTION_SEQUENCE.findIndex((entry) => entry === label);
+    const isInfractionCol = labelIndex >= 0;
     if (!isInfractionCol) return; // Allow non-infraction edits within the active week
 
     const newVal = typeof e.value === 'undefined' ? sheet.getRange(row, col).getValue() : e.value;
     if (!newVal || newVal === '') return;
 
+    const originalRange = e.range;
+    let workingRange = originalRange;
+    let workingColumn = col;
+    let workingLabelIndex = labelIndex;
+
+    let weekBlock = getWeekColumnBlocks(sheet).find(
+      (block) => col >= block.startCol && col <= block.endCol
+    );
+    if (!weekBlock && cols) {
+      weekBlock = { startCol: cols.startCol, endCol: cols.endCol, label: 'active' };
+    }
+
+    if (weekBlock) {
+      const firstMissingIndex = INFRACTION_SEQUENCE.findIndex((_, idx) => {
+        const requiredValue = sheet.getRange(row, weekBlock.startCol + idx).getValue();
+        return requiredValue === '' || requiredValue === null;
+      });
+
+      if (firstMissingIndex !== -1 && labelIndex > firstMissingIndex) {
+        const targetColumn = weekBlock.startCol + firstMissingIndex;
+        const targetRange = sheet.getRange(row, targetColumn);
+        if (typeof e.oldValue !== 'undefined') {
+          originalRange.setValue(e.oldValue);
+        } else {
+          originalRange.clearContent();
+        }
+        targetRange.setValue(newVal);
+        if (canUseUi()) {
+          SpreadsheetApp.getActive().toast(
+            `Value moved to the ${INFRACTION_SEQUENCE[firstMissingIndex]} infraction column for this week.`,
+            'BSS: Sequence Adjusted',
+            5
+          );
+        }
+        debugLog(
+          `[${sheetName}] Auto-moved entry at R${row}C${col} to ${INFRACTION_SEQUENCE[firstMissingIndex]} column (C${targetColumn}).`
+        );
+        workingRange = targetRange;
+        workingColumn = targetColumn;
+        workingLabelIndex = firstMissingIndex;
+        labelIndex = firstMissingIndex;
+      }
+
+      if (workingLabelIndex > 0) {
+        for (let i = 0; i < workingLabelIndex; i++) {
+          const requiredCol = weekBlock.startCol + i;
+          const requiredValue = sheet.getRange(row, requiredCol).getValue();
+          if (requiredValue === '' || requiredValue === null) {
+            if (workingRange === originalRange) {
+              if (typeof e.oldValue !== 'undefined') {
+                workingRange.setValue(e.oldValue);
+              } else {
+                workingRange.clearContent();
+              }
+            } else {
+              workingRange.clearContent();
+            }
+            if (canUseUi()) {
+              SpreadsheetApp.getActive().toast(
+                `Enter the ${INFRACTION_SEQUENCE[i]} infraction before recording the ${
+                  INFRACTION_SEQUENCE[workingLabelIndex]
+                }.`,
+                'BSS: Sequence Required',
+                5
+              );
+            }
+            debugLog(
+              `[${sheetName}] Blocked ${INFRACTION_SEQUENCE[workingLabelIndex]} entry at R${row}C${workingColumn}: missing ${INFRACTION_SEQUENCE[i]}.`
+            );
+            return;
+          }
+        }
+      }
+    }
+
     // Require previously-confirmed email (do NOT prompt here—simple trigger)
     const email = getSavedUserEmail_();
     if (!email) {
-      const oldVal = typeof e.oldValue === 'undefined' ? '' : e.oldValue;
-      sheet.getRange(row, col).setValue(oldVal);
-      sheet.getRange(row, col).setNote('Edit blocked: confirm your email via menu “Conway BSS → Confirm My Email…”.');
+      if (workingRange === originalRange) {
+        if (typeof e.oldValue !== 'undefined') {
+          workingRange.setValue(e.oldValue);
+        } else {
+          workingRange.clearContent();
+        }
+      } else {
+        workingRange.clearContent();
+      }
+      originalRange.setNote('Edit blocked: confirm your email via menu “Conway BSS → Confirm My Email…”.');
       return;
     }
 
     // Stamp note with author + timestamp (most recent on top)
     const stamp = 'Entered by: ' + email + ' | ' + new Date().toLocaleString();
-    const prevNote = sheet.getRange(row, col).getNote() || '';
+    const prevNote = workingRange.getNote() || '';
     const note = stamp + (prevNote ? '\n' + prevNote : '');
-    sheet.getRange(row, col).setNote(note);
+    workingRange.setNote(note);
   } catch (err) {
     try {
       Logger.log('onEdit error: ' + err);
@@ -679,10 +764,12 @@ function processNewEvents(): void {
     const dsidIdx = sheetHeaders.indexOf('DSID');
     if (dsidIdx === -1) return;
 
-    const infractionLabels = ['1st', '2nd', '3rd', '4th', '5th'];
     const infractionCols: number[] = [];
     for (let c = 0; c < sheetHeaders.length; c++) {
-      if (infractionLabels.includes((data[1][c] || '').toLowerCase())) infractionCols.push(c);
+      const labelValue = (data[1][c] || '').toString().trim().toLowerCase();
+      if (INFRACTION_SEQUENCE.includes(labelValue as typeof INFRACTION_SEQUENCE[number])) {
+        infractionCols.push(c);
+      }
     }
 
     for (let r = FIRST_STUDENT_ROW; r < data.length; r++) {
@@ -1169,11 +1256,16 @@ function openDebugLogSheet(): void {
 
 function showAboutDialog(): void {
   if (!canUseUi()) return;
-  SpreadsheetApp.getUi().alert(
-    'Conway BSS\n\n' +
-      'Robust Behavior System for team-based infraction tracking, roster management, and automated alerts.\n\n' +
-      'Built for Conway. For help, contact your system administrator.'
-  );
+  const message =
+    'Conway Behavior Support System\n' +
+    '\n' +
+    'Track infractions, sync rosters, and notify teams with guardrails that keep weekly data accurate.\n' +
+    '\n' +
+    'Need help or have feedback? Contact your Conway administrator or the FS support team.\n' +
+    '\n' +
+    '© 2025 FS';
+
+  SpreadsheetApp.getUi().alert('About Conway BSS', message, SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 function buildPrefillLink(mergeFields: Record<string, unknown>): string {
